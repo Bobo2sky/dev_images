@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <functional> // 补充bind所需头文件
+#include <vector>
 
 // 避免命名空间冲突：不使用using namespace，显式指定命名空间
 // 核心修复：所有ROS2相关类显式用rclcpp::，OpenCV用cv::
@@ -27,6 +28,14 @@ class CompressedImageSaver : public rclcpp::Node // 显式指定rclcpp::Node
 public:
     CompressedImageSaver() : rclcpp::Node("compressed_image_saver_cpp") // 修正基类初始化
     {
+        // -------- 参数（可通过 params yaml 覆盖） --------
+        // 默认值保持与之前硬编码一致，避免不传参时行为改变
+        this->declare_parameter<std::string>("image_topic", "/camera_mid_front_up");
+        this->declare_parameter<std::string>("lidar_topic", "/livox/lidar");
+
+        const auto image_topic = this->get_parameter("image_topic").as_string();
+        const auto lidar_topic = this->get_parameter("lidar_topic").as_string();
+
         // 创建保存目录（不存在则创建）
         save_dir_ = "saved_images_cpp";
         std::filesystem::create_directory(save_dir_);
@@ -37,17 +46,19 @@ public:
 
         // 订阅CompressedImage话题（修复create_subscription调用）
         subscription_ = this->create_subscription<sensor_msgs::msg::CompressedImage>(
-            "/camera_mid_front_up", // 话题名
-            10,                     // QoS深度
+            image_topic, // 话题名（参数化）
+            10,          // QoS深度
             std::bind(&CompressedImageSaver::image_callback, this, std::placeholders::_1));
 
         // 订阅PointCloud2话题，用于逐帧解析点云
         pc_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/livox/lidar",
+            lidar_topic,
             10,
             std::bind(&CompressedImageSaver::pointcloud_callback, this, std::placeholders::_1));
 
         RCLCPP_INFO(this->get_logger(), "图像保存节点已启动！");
+        RCLCPP_INFO(this->get_logger(), "订阅图像话题：%s", image_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "订阅雷达话题：%s", lidar_topic.c_str());
         RCLCPP_INFO(this->get_logger(), "图像将保存至：%s", std::filesystem::absolute(save_dir_).c_str());
     }
 
@@ -106,7 +117,7 @@ private:
 
             // 构造文件名，使用header.stamp（sec_nanosec）以便与图像对应
             std::stringstream ss_fn;
-            ss_fn << "pc_" << msg->header.stamp.sec << "_" << msg->header.stamp.nanosec << ".pcd";
+            ss_fn << msg->header.stamp.sec << msg->header.stamp.nanosec << ".pcd";
             std::string filename = ss_fn.str();
             std::string file_path = save_pc_dir_ + "/" + filename;
 
@@ -165,11 +176,64 @@ private:
 
 int main(int argc, char *argv[])
 {
+    const auto default_params_file = []()
+    {
+        return std::string("/workspace/dev_images/config/config.yaml");
+    }();
+
+    const auto has_flag = [&](const std::string &flag)
+    {
+        for (int i = 1; i < argc; ++i)
+        {
+            if (argv[i] && flag == argv[i])
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const bool has_params_file = has_flag("--params-file");
+    const bool default_params_exists = std::filesystem::exists(default_params_file);
+
+    std::vector<std::string> args;
+    args.reserve(static_cast<size_t>(argc) + 4);
+    for (int i = 0; i < argc; ++i)
+    {
+        args.emplace_back(argv[i]);
+    }
+
+    if (!has_params_file && default_params_exists)
+    {
+        args.emplace_back("--ros-args");
+        args.emplace_back("--params-file");
+        args.emplace_back(default_params_file);
+    }
+
+    std::vector<const char *> argv_ptrs;
+    argv_ptrs.reserve(args.size());
+    for (const auto &s : args)
+    {
+        argv_ptrs.push_back(s.c_str());
+    }
+
     // 初始化ROS2
-    rclcpp::init(argc, argv);
+    rclcpp::init(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
 
     // 创建节点并运行（修复spin参数类型）
     auto node = std::make_shared<CompressedImageSaver>();
+
+    if (!has_params_file)
+    {
+        if (default_params_exists)
+        {
+            RCLCPP_INFO(node->get_logger(), "已自动加载参数文件：%s", default_params_file.c_str());
+        }
+        else
+        {
+            RCLCPP_WARN(node->get_logger(), "默认参数文件不存在：%s（将使用代码默认参数）", default_params_file.c_str());
+        }
+    }
     rclcpp::spin(node);
 
     // 关闭ROS2

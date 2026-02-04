@@ -1,0 +1,4 @@
+/compressed_image_saver_cpp:
+  ros__parameters:
+    image_topic: "/camera/mid_front/image_raw/compressed"
+    lidar_topic: "/livox/lidar"
